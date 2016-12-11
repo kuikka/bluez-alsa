@@ -374,11 +374,6 @@ void *io_thread_a2dp_sink_sbc(void *arg) {
 		const rtp_header_t *rtp_header = (rtp_header_t *)in_buffer;
 		const rtp_payload_sbc_t *rtp_payload = (rtp_payload_sbc_t *)&rtp_header->csrc[rtp_header->cc];
 
-		if (rtp_header->paytype != 96) {
-			warn("Unsupported RTP payload type: %u", rtp_header->paytype);
-			continue;
-		}
-
 		const uint8_t *input = (uint8_t *)(rtp_payload + 1);
 		int16_t *output = out_buffer;
 		size_t input_len = len - (input - in_buffer);
@@ -723,11 +718,6 @@ void *io_thread_a2dp_sink_aac(void *arg) {
 		const rtp_header_t *rtp_header = (rtp_header_t *)in_buffer;
 		uint8_t *rtp_latm = (uint8_t *)&rtp_header->csrc[rtp_header->cc];
 		size_t rtp_latm_len = len - ((void *)rtp_latm - (void *)rtp_header);
-
-		if (rtp_header->paytype != 96) {
-			warn("Unsupported RTP payload type: %u", rtp_header->paytype);
-			continue;
-		}
 
 		unsigned int data_len = rtp_latm_len;
 		unsigned int valid = rtp_latm_len;
