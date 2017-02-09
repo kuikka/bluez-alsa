@@ -22,10 +22,12 @@
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
 #include <bluetooth/hci_lib.h>
+#include <bluetooth/sco.h>
 
 #include <gio/gunixfdlist.h>
 
 #include "a2dp-codecs.h"
+#include "hfp-codecs.h"
 #include "bluealsa.h"
 #include "io.h"
 #include "log.h"
@@ -592,7 +594,13 @@ unsigned int transport_get_sampling(const struct ba_transport *t) {
 	case TRANSPORT_TYPE_RFCOMM:
 		break;
 	case TRANSPORT_TYPE_SCO:
-		return 8000;
+		switch (t->sco.codec) {
+			case SCO_CODEC_CVSD:
+			default:
+				return 8000;
+			case SCO_CODEC_MSBC:
+				return 16000;
+		}
 	}
 
 	/* the sampling frequency is unspecified */
@@ -823,6 +831,8 @@ int transport_release_bt_rfcomm(struct ba_transport *t) {
 int transport_acquire_bt_sco(struct ba_transport *t) {
 
 	struct hci_dev_info di;
+	struct sco_options sco_opt;
+	socklen_t len = sizeof(sco_opt);
 
 	if (t->bt_fd != -1)
 		return t->bt_fd;
@@ -832,19 +842,28 @@ int transport_acquire_bt_sco(struct ba_transport *t) {
 		return -1;
 	}
 
-	if ((t->bt_fd = hci_open_sco(&di, &t->device->addr)) == -1) {
+	if ((t->bt_fd = hci_open_sco(&di, &t->device->addr, t->sco.codec == SCO_CODEC_MSBC)) == -1) {
 		error("Couldn't open SCO link: %s", strerror(errno));
 		return -1;
 	}
 
-	t->mtu_read = di.sco_mtu;
-	t->mtu_write = di.sco_mtu;
-	t->release = transport_release_bt_sco;
+	if (getsockopt(t->bt_fd, SOL_SCO, SCO_OPTIONS, &sco_opt, &len) == -1) {
+		error("Could not get SCO options: %s", strerror(errno));
+		close(t->bt_fd);
+		t->bt_fd = -1;
+		return -1;
+	}
 
-	/* XXX: It seems, that the MTU values returned by the HCI interface
-	 *      are incorrect (or our interpretation of them is incorrect). */
-	t->mtu_read = 48;
-	t->mtu_write = 48;
+#if 0
+	// There MTU values do not seem to work
+	t->mtu_read = sco_opt.mtu;
+	t->mtu_write = sco_opt.mtu;
+#endif
+	// Try to detect
+	t->mtu_read = 0;
+	t->mtu_write = 0;
+
+	t->release = transport_release_bt_sco;
 
 	debug("New SCO link: %d (MTU: R:%zu W:%zu)", t->bt_fd, t->mtu_read, t->mtu_write);
 

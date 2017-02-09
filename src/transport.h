@@ -154,6 +154,9 @@ struct ba_transport {
 			/* software audio gain in range [0, 15] */
 			uint8_t spk_gain;
 			uint8_t mic_gain;
+			uint32_t hf_features;
+			/* codec (1 = CVSD, 2 = mSBC) */
+			uint8_t codec;
 
 			/* Speaker and microphone signals should to be exposed as
 			 * a separate PCM devices. Hence, there is a requirement
