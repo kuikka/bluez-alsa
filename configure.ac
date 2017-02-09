@@ -49,6 +49,13 @@ AM_COND_IF([ENABLE_AAC], [
 	AC_DEFINE([ENABLE_AAC], [1], [Define to 1 if AAC is enabled.])
 ])
 
+AC_ARG_ENABLE([msbc],
+	[AS_HELP_STRING([--enable-msbc], [enable MSBC support])])
+AM_CONDITIONAL([ENABLE_MSBC], [test "x$enable_msbc" = "xyes"])
+AM_COND_IF([ENABLE_MSBC], [
+	AC_DEFINE([ENABLE_MSBC], [1], [Define to 1 if MSBC is enabled.])
+])
+
 AC_ARG_ENABLE([hcitop],
 	[AS_HELP_STRING([--disable-hcitop], [disable building of hcitop tool])])
 AM_CONDITIONAL([ENABLE_HCITOP], [test "x$enable_hcitop" != "xno"])
