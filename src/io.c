@@ -10,6 +10,7 @@
 
 #include "io.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -32,6 +33,7 @@
 #endif
 
 #include "a2dp-codecs.h"
+#include "hfp-codecs.h"
 #include "a2dp-rtp.h"
 #include "bluealsa.h"
 #include "log.h"
@@ -94,8 +96,16 @@ static int io_thread_open_pcm_write(struct ba_pcm *pcm) {
 	if (pcm->fd == -1) {
 
 		debug("Opening FIFO for writing: %s", pcm->fifo);
-		if ((pcm->fd = open(pcm->fifo, O_WRONLY | O_NONBLOCK)) == -1)
-			/* FIFO endpoint is not connected yet */
+		int retries = 5;
+		while(retries-- && pcm->fd == -1) {
+			if ((pcm->fd = open(pcm->fifo, O_WRONLY | O_NONBLOCK)) == -1) {
+				/* FIFO endpoint is not connected yet */
+				debug("PCM write open failed: errno=%d", errno);
+				//return -1;
+			}
+			usleep(10 * 1000);
+		}
+		if (pcm->fd == -1)
 			return -1;
 
 		/* Restore the blocking mode of our FIFO. Non-blocking mode was required
@@ -233,7 +243,7 @@ static ssize_t io_thread_write_at_command(int fd, const char *msg) {
  * Write AT response code to the RFCOMM. */
 static ssize_t io_thread_write_at_response(int fd, const char *msg) {
 
-	char buffer[64];
+	char buffer[256];
 
 	snprintf(buffer, sizeof(buffer), "\r\n%s\r\n", msg);
 	return io_thread_write_rfcomm(fd, buffer);
@@ -253,6 +263,9 @@ static int io_thread_time_sync(struct io_sync *io_sync, uint32_t frames) {
 	struct timespec ts_audio;
 	struct timespec ts_clock;
 	struct timespec ts;
+
+	if (!frames)
+		return 0;
 
 	/* calculate the playback duration of given frames */
 	unsigned int sec = frames / sampling;
@@ -1049,6 +1062,132 @@ fail_open:
 }
 #endif
 
+enum at_cmd_type
+{
+	AT_CMD_TYPE_SET,
+	AT_CMD_TYPE_GET,
+	AT_CMD_TYPE_TEST,
+};
+
+#define AT_MAX_CMD_SIZE		16
+#define AT_MAX_VALUE_SIZE	64
+
+struct at_command
+{
+	enum at_cmd_type type;
+	char command[AT_MAX_CMD_SIZE];
+	char value[AT_MAX_VALUE_SIZE];
+};
+
+#if 0
+void hexdump(const void *p, size_t len)
+{
+	unsigned char *ptr = (unsigned char*)p;
+	while (len >= 16)
+	{
+		printf("%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x"
+				"        "
+				"%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
+				ptr[0], ptr[1], ptr[2], ptr[3],
+				ptr[4], ptr[5], ptr[6], ptr[7],
+				ptr[8], ptr[9], ptr[10], ptr[11],
+				ptr[12], ptr[13], ptr[14], ptr[15],
+
+				isprint(ptr[0]) ? ptr[0] : '.',
+				isprint(ptr[1]) ? ptr[1] : '.',
+				isprint(ptr[2]) ? ptr[2] : '.',
+				isprint(ptr[3]) ? ptr[3] : '.',
+				isprint(ptr[4]) ? ptr[4] : '.',
+				isprint(ptr[5]) ? ptr[5] : '.',
+				isprint(ptr[6]) ? ptr[6] : '.',
+				isprint(ptr[7]) ? ptr[7] : '.',
+				isprint(ptr[8]) ? ptr[8] : '.',
+				isprint(ptr[9]) ? ptr[9] : '.',
+				isprint(ptr[10]) ? ptr[10] : '.',
+				isprint(ptr[11]) ? ptr[11] : '.',
+				isprint(ptr[12]) ? ptr[12] : '.',
+				isprint(ptr[13]) ? ptr[13] : '.',
+				isprint(ptr[14]) ? ptr[14] : '.',
+				isprint(ptr[15]) ? ptr[15] : '.');
+
+
+		len -= 16;
+		ptr += 16;
+	}
+
+	if (len)
+	{
+		for (int i = 0; i < len; i++)
+			printf("%02x ", ptr[i]);
+
+		for (int i = 0; i < ((16 - len) * 3 - 1 + 8); i++)
+			printf(" ");
+
+		for (int i = 0; i < len; i++)
+			printf("%c", isprint(ptr[i]) ? ptr[i] : '.');
+
+		printf("\n");
+	}
+}
+#endif
+
+/* str gets modified */
+int at_parse(char *str, struct at_command *cmd)
+{
+	memset(cmd->command, 0, sizeof(cmd->command));
+	memset(cmd->value, 0, sizeof(cmd->value));
+
+	/* Skip initial whitespace */
+	const char *s = str;
+	while (isspace(*s))
+		s++;
+
+	/* Remove trailing whitespace */
+	char *end = str + strlen(str) - 1;
+	while(end >= s && isspace(*end))
+		*end-- = '\0';
+
+	/* starts with AT? */
+	if (strncasecmp(s, "AT", 2))
+		return -1;
+
+	/* Can we find equals sign? */
+	char *equal = strstr(s, "=");
+	if (equal != NULL)
+	{
+		/* Set (ATxxx=value or test (ATxxx=?) */
+		strncpy(cmd->command, s + 2, equal - s - 2);
+
+		if (equal[1] == '?')
+		{
+			cmd->type = AT_CMD_TYPE_TEST;
+		}
+		else
+		{
+			cmd->type = AT_CMD_TYPE_SET;
+			strncpy(cmd->value, equal + 1, AT_MAX_VALUE_SIZE - 1);
+		}
+	}
+	else
+	{
+		/* Get (ATxxx?) */
+		cmd->type = AT_CMD_TYPE_GET;
+		char *question = strstr(s, "?");
+		if (question != NULL )
+			strncpy(cmd->command, s + 2, question - s - 2);
+		else
+			return -1;
+	}
+	debug("Got %s\ntype = %d\ncommand = %s\nvalue = %s", str, cmd->type, cmd->command, cmd->value);
+	return 0;
+}
+
+#define HFP_AG_FEAT_CODEC	(1 << 9)
+#define HFP_HF_FEAT_CODEC	(1 << 7)
+#define HFP_AG_FEAT_ECS		(1 << 6)
+
+#define HFP_AG_FEATURES		 HFP_AG_FEAT_ECS
+
 void *io_thread_rfcomm(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
@@ -1064,17 +1203,23 @@ void *io_thread_rfcomm(void *arg) {
 		{ t->bt_fd, POLLIN, 0 },
 	};
 
+	/* Default to CVSD codec */
+	t->rfcomm.sco->sco.codec = SCO_CODEC_CVSD;
+
 	debug("Starting RFCOMM loop: %s",
 			bluetooth_profile_to_string(t->profile, t->codec));
 	for (;;) {
 
 		const char *response = "OK";
-		char command[16], value[32];
+		struct at_command at;
 		ssize_t ret;
 
 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 
-		if (poll(pfds, sizeof(pfds) / sizeof(*pfds), -1) == -1) {
+		ret = poll(pfds, sizeof(pfds) / sizeof(*pfds), -1);
+		debug("poll ret=%zd", ret);
+		//if (poll(pfds, sizeof(pfds) / sizeof(*pfds), -1) == -1) {
+		if (ret == -1) {
 			error("Transport poll error: %s", strerror(errno));
 			goto fail;
 		}
@@ -1103,6 +1248,7 @@ void *io_thread_rfcomm(void *arg) {
 			continue;
 		}
 
+		memset(buffer, 0, sizeof(buffer));
 		if ((ret = read(pfds[1].fd, buffer, sizeof(buffer))) == -1) {
 			switch (errno) {
 			case ECONNABORTED:
@@ -1120,24 +1266,24 @@ void *io_thread_rfcomm(void *arg) {
 		}
 
 		/* Parse AT command received from the headset. */
-		if (sscanf(buffer, "AT%15[^=]=%30s", command, value) != 2) {
+		debug("AT: %s\n", buffer);
+
+		if (at_parse(buffer, &at)) {
 			warn("Invalid AT command: %s", buffer);
 			continue;
 		}
 
-		debug("AT command: %s=%s", command, value);
-
-		if (strcmp(command, "RING") == 0) {
+		if (strcmp(at.command, "RING") == 0) {
 		}
-		else if (strcmp(command, "+CKPD") == 0 && atoi(value) == 200) {
+		else if (strcmp(at.command, "+CKPD") == 0 && atoi(at.value) == 200) {
 		}
-		else if (strcmp(command, "+VGM") == 0)
-			t->rfcomm.sco->sco.mic_gain = mic_gain = atoi(value);
-		else if (strcmp(command, "+VGS") == 0)
-			t->rfcomm.sco->sco.spk_gain = spk_gain = atoi(value);
-		else if (strcmp(command, "+IPHONEACCEV") == 0) {
+		else if (strcmp(at.command, "+VGM") == 0)
+			t->rfcomm.sco->sco.mic_gain = mic_gain = atoi(at.value);
+		else if (strcmp(at.command, "+VGS") == 0)
+			t->rfcomm.sco->sco.spk_gain = spk_gain = atoi(at.value);
+		else if (strcmp(at.command, "+IPHONEACCEV") == 0) {
 
-			char *ptr = value;
+			char *ptr = at.value;
 			size_t count = atoi(strsep(&ptr, ","));
 			char tmp;
 
@@ -1157,12 +1303,12 @@ void *io_thread_rfcomm(void *arg) {
 				}
 
 		}
-		else if (strcmp(command, "+XAPL") == 0) {
+		else if (strcmp(at.command, "+XAPL") == 0) {
 
 			unsigned int vendor, product;
 			unsigned int version, features;
 
-			if (sscanf(value, "%x-%x-%u,%u", &vendor, &product, &version, &features) == 4) {
+			if (sscanf(at.value, "%x-%x-%u,%u", &vendor, &product, &version, &features) == 4) {
 				t->device->xapl.vendor_id = vendor;
 				t->device->xapl.product_id = product;
 				t->device->xapl.version = version;
@@ -1170,13 +1316,94 @@ void *io_thread_rfcomm(void *arg) {
 				response = "+XAPL=BlueALSA,0";
 			}
 			else {
-				warn("Invalid XAPL value: %s", value);
+				warn("Invalid XAPL value: %s", at.value);
 				response = "ERROR";
 			}
 
 		}
+		else if (strcmp(at.command, "+BRSF") == 0) {
+			uint32_t hf_features = strtoul(at.value, NULL, 10);
+			debug("Got HF features: 0x%x", hf_features);
+
+			uint32_t ag_features = HFP_AG_FEATURES;
+#if defined(ENABLE_MSBC)
+			if (hf_features & (HFP_HF_FEAT_CODEC)) {
+				ag_features |= HFP_AG_FEAT_CODEC;
+			}
+			else
+#endif
+		       	{
+				/* Codec negotiation is not supported,
+				hence no wideband audio support.
+				AT+BAC is not sent*/
+				t->rfcomm.sco->sco.codec = SCO_CODEC_CVSD;
+			}
+
+			t->rfcomm.sco->sco.hf_features = hf_features;
+
+			snprintf(buffer, sizeof(buffer), "+BRSF: %u", ag_features);
+			io_thread_write_at_response(pfds[1].fd, buffer);
+		}
+		else if (strcmp(at.command, "+BAC") == 0 && at.type == AT_CMD_TYPE_SET) {
+			debug("Supported codecs: %s", at.value);
+			/* Split codecs string */
+			gchar **codecs = g_strsplit(at.value, ",", 0);
+			for (int i = 0; codecs[i]; i++) {
+				gchar *codec = codecs[i];
+				uint32_t codec_value = strtoul(codec, NULL, 10);
+				if (codec_value == SCO_CODEC_MSBC) {
+					t->rfcomm.sco->sco.codec = SCO_CODEC_MSBC;
+				}
+			}
+			g_strfreev(codecs);
+		}
+		else if (strcmp(at.command, "+CIND") == 0) {
+			if ( at.type == AT_CMD_TYPE_GET) {
+				io_thread_write_at_response(pfds[1].fd,
+					"+CIND: 0,0,1,4,0,4,0");
+			}
+			else if(at.type == AT_CMD_TYPE_TEST) {
+				io_thread_write_at_response(pfds[1].fd,
+					"+CIND: "
+					"(\"call\",(0,1))"
+					",(\"callsetup\",(0-3))"
+					",(\"service\",(0-1))"
+					",(\"signal\",(0-5))"
+					",(\"roam\",(0,1))"
+					",(\"battchg\",(0-5))"
+					",(\"callheld\",(0-2))"
+					);
+			}
+		}
+		else if (strcmp(at.command, "+CMER") == 0 && at.type == AT_CMD_TYPE_SET) {
+			/* +CMER is the last step of the "Service Level
+			   Connection establishment" procedure */
+
+			/* Send OK */
+			io_thread_write_at_response(pfds[1].fd, response);
+			/* Send codec select */
+			if (t->rfcomm.sco->sco.codec != SCO_CODEC_CVSD) {
+				snprintf(buffer, sizeof(buffer), "+BCS: %u", t->rfcomm.sco->sco.codec);
+				io_thread_write_at_response(pfds[1].fd, buffer);
+			}
+			continue;
+		}
+		else if (strcmp(at.command, "+BCS") == 0 && at.type == AT_CMD_TYPE_SET) {
+			debug("Got codec selected: %d", atoi(at.value));
+		}
+		else if (strcmp(at.command, "+BTRH") == 0 && at.type == AT_CMD_TYPE_GET) {
+		}
+		else if (strcmp(at.command, "+NREC") == 0 && at.type == AT_CMD_TYPE_SET) {
+		}
+		else if (strcmp(at.command, "+CCWA") == 0 && at.type == AT_CMD_TYPE_SET) {
+		}
+		else if (strcmp(at.command, "+BIA") == 0 && at.type == AT_CMD_TYPE_SET) {
+		}
+		else if (strcmp(at.command, "+CHLD") == 0 && at.type == AT_CMD_TYPE_TEST) {
+			io_thread_write_at_response(pfds[1].fd, "+CHLD: (0,1,2,3)");
+		}
 		else {
-			warn("Unsupported AT command: %s=%s", command, value);
+			warn("Unsupported AT command: %s", buffer);
 			response = "ERROR";
 		}
 
@@ -1189,16 +1416,236 @@ fail:
 	return NULL;
 }
 
+#define SCO_H2_HDR_LEN		2
+#define MSBC_FRAME_LEN		57
+#define SCO_H2_FRAME_LEN	(SCO_H2_HDR_LEN + MSBC_FRAME_LEN)
+
+#define MSBC_PCM_LEN		240
+#define SCO_H2_HDR_0		0x01
+#define MSBC_SYNC		0xAD
+
+static int io_thread_read_pcm_write_bt(struct ba_pcm *pcm, int16_t *buffer, ssize_t samples, int bt_fd)
+{
+	/* read data from the FIFO - this function will block */
+	if ((samples = samples = io_thread_read_pcm(pcm, buffer, samples)) <= 0) {
+		if (samples == -1) {
+			error("FIFO read error: %s", strerror(errno));
+			return -1;
+		}
+	}
+
+	int err = write(bt_fd, buffer, samples * sizeof(int16_t));
+	if (err == -1) {
+		error("SCO socket write error: %s", strerror(errno));
+		return -1;
+	}
+
+	return samples;
+}
+
+#if defined(ENABLE_MSBC)
+struct msbc_frame {
+	uint8_t h2_header[SCO_H2_HDR_LEN];
+	uint8_t payload[MSBC_FRAME_LEN];
+	uint8_t padding;
+};
+
+struct sbc_state {
+	size_t sbc_frame_len;
+
+	/* decoder */
+	sbc_t dec;
+	size_t dec_buffer_cnt;
+	size_t dec_buffer_size;
+	uint8_t dec_buffer[SCO_H2_FRAME_LEN * 2];
+	uint8_t dec_pcm_buffer[MSBC_PCM_LEN];
+
+	/* encoder */
+	sbc_t enc;
+	size_t enc_buffer_cnt; /* bytes of data in the beginning of the buffer */
+	size_t enc_buffer_size;
+	uint8_t enc_buffer[SCO_H2_FRAME_LEN * 4];
+
+	size_t enc_pcm_buffer_cnt; /* e.g. bytes of data in buffer */
+	size_t enc_pcm_buffer_size; /* in bytes */
+	uint8_t enc_pcm_buffer[MSBC_PCM_LEN * 4];
+	ssize_t enc_pcm_size; /* PCM data length in bytes. Should be 240 bytes */
+	ssize_t enc_frame_len; /* mSBC frame length, without H2 header. Should be 57 bytes */
+	unsigned enc_frame_number;
+};
+
+#if defined (SILENCE)
+uint8_t msbc_zero[] = {
+	0xad, 0x0, 0x0, 0xc5, 0x0, 0x0, 0x0, 0x0, 0x77, 0x6d, 0xb6, 0xdd,
+	0xdb, 0x6d, 0xb7, 0x76, 0xdb, 0x6d, 0xdd, 0xb6, 0xdb, 0x77, 0x6d,
+	0xb6, 0xdd, 0xdb, 0x6d, 0xb7, 0x76, 0xdb, 0x6d, 0xdd, 0xb6, 0xdb,
+	0x77, 0x6d, 0xb6, 0xdd, 0xdb, 0x6d, 0xb7, 0x76, 0xdb, 0x6d, 0xdd,
+	0xb6, 0xdb, 0x77, 0x6d, 0xb6, 0xdd, 0xdb, 0x6d, 0xb7, 0x76, 0xdb,
+	0x6c
+};
+#endif
+
+int iothread_write_encoded_data(int bt_fd, struct sbc_state *sbc, size_t length)
+{
+	size_t written = 0;
+
+	if (sbc->enc_buffer_cnt < length) {
+		warn("Encoded data underflow");
+		return -1;
+	}
+
+	if ((written = write(bt_fd, sbc->enc_buffer, length)) == -1) {
+		if (errno != EWOULDBLOCK && errno != EAGAIN)
+			warn("Could not write to mSBC socket: %s", strerror(errno));
+		return -1;
+	}
+
+	memmove(sbc->enc_buffer,
+		sbc->enc_buffer + written,
+		sbc->enc_buffer_cnt - written);
+
+	sbc->enc_buffer_cnt -= written;
+
+	return 0;
+}
+
+static struct sbc_state* iothread_initialize_msbc(struct sbc_state *sbc)
+{
+	if (!sbc) {
+		sbc = malloc(sizeof(*sbc));
+		if (!sbc) {
+			error("Cannot allocate SBC");
+			return NULL;
+		}
+	}
+
+	memset(sbc, 0, sizeof(*sbc));
+
+	if (errno = -sbc_init_msbc(&sbc->dec, 0) != 0) {
+		error("Couldn't initialize mSBC decoder: %s", strerror(errno));
+		goto fail;
+	}
+
+	if (errno = -sbc_init_msbc(&sbc->enc, 0) != 0) {
+		error("Couldn't initialize mSBC decoder: %s", strerror(errno));
+		goto fail;
+	}
+
+	sbc->sbc_frame_len = sbc_get_frame_length(&sbc->dec);
+	sbc->dec_buffer_size = sizeof(sbc->dec_buffer);
+
+	sbc->enc_pcm_size = sbc_get_codesize(&sbc->enc);
+	sbc->enc_frame_len = sbc_get_frame_length(&sbc->enc);
+	sbc->enc_buffer_size = sizeof(sbc->enc_buffer);
+	sbc->enc_pcm_buffer_size = sizeof(sbc->enc_pcm_buffer);
+	if (sbc->enc_frame_len != MSBC_FRAME_LEN) {
+		error("Unexpected mSBC frame size: %zd", sbc->enc_frame_len); 
+	}
+
+	return sbc;
+
+fail:
+	free(sbc);
+
+	return NULL;
+}
+
+void iothread_encode_msbc_frames(struct sbc_state *sbc)
+{
+	static const uint8_t h2_header_frame_number[] = {
+		0x08, 0x38, 0xc8, 0xf8
+	};
+
+	size_t written, pcm_consumed = 0;
+	ssize_t len;
+
+	/* Encode all we can */
+	while ((sbc->enc_pcm_buffer_cnt - pcm_consumed) >= sbc->enc_pcm_size &&
+	       (sbc->enc_buffer_size - sbc->enc_buffer_cnt) >= SCO_H2_FRAME_LEN) {
+
+		struct msbc_frame *frame = (struct msbc_frame*)(sbc->enc_buffer
+								+ sbc->enc_buffer_cnt);
+
+		if ((len = sbc_encode(&sbc->enc,
+				      sbc->enc_pcm_buffer + pcm_consumed,
+				      sbc->enc_pcm_buffer_cnt - pcm_consumed,
+				      frame->payload,
+				      sizeof(frame->payload),
+				      &written)) < 0) {
+			error("Unable to encode mSBC: %s", strerror(-len));
+			return;
+		};
+
+		pcm_consumed += len;
+
+		frame->h2_header[0] = SCO_H2_HDR_0;
+		frame->h2_header[1] = h2_header_frame_number[sbc->enc_frame_number];
+		sbc->enc_frame_number = ((sbc->enc_frame_number) + 1) % 4;
+		sbc->enc_buffer_cnt += sizeof(*frame);
+
+#ifdef SILENCE
+		memcpy(frame->payload, msbc_zero, sizeof(frame->payload));
+#endif
+	}
+	/* Reshuffle remaining PCM samples to the beginning of the buffer */
+	memmove(sbc->enc_pcm_buffer,
+		sbc->enc_pcm_buffer + pcm_consumed,
+		sbc->enc_pcm_buffer_cnt - pcm_consumed);
+
+	/* And deduct consumed data */
+	sbc->enc_pcm_buffer_cnt -= pcm_consumed;
+}
+
+void iothread_find_and_decode_msbc(int pcm_fd, struct sbc_state *sbc)
+{
+	ssize_t len;
+	size_t bytes_left = sbc->dec_buffer_cnt;
+	uint8_t *p = (uint8_t*) sbc->dec_buffer;
+
+	/* Find frame start */
+	while (bytes_left >= SCO_H2_HDR_LEN + sbc->sbc_frame_len) {
+		if (p[0] == SCO_H2_HDR_0 && p[2] == MSBC_SYNC) {
+			/* Found frame.  TODO: Check SEQ, implement PLC */
+			size_t decoded = 0;
+			if ((len = sbc_decode(&sbc->dec,
+					      p + 2,
+					      sbc->sbc_frame_len,
+					      sbc->dec_pcm_buffer,
+					      sizeof(sbc->dec_pcm_buffer),
+					      &decoded)) < 0) {
+				error("mSBC decoding error: %s\n", strerror(-len));
+				sbc->dec_buffer_cnt = 0;
+				return;
+			}
+			bytes_left -= len + SCO_H2_HDR_LEN;
+			p += len + SCO_H2_HDR_LEN;
+			write(pcm_fd, sbc->dec_pcm_buffer, decoded);
+		}
+		else {
+			bytes_left--;
+			p++;
+		}
+	}
+	memmove(sbc->dec_buffer, p, bytes_left);
+	sbc->dec_buffer_cnt = bytes_left;
+}
+#endif
+
 void *io_thread_sco(void *arg) {
+
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	/* this buffer has to be bigger than SCO MTU */
-	const size_t buffer_size = 512;
-	int16_t *buffer = malloc(buffer_size);
+	const size_t pcm_buffer_size = 512;
+	int16_t *pcm_buffer = malloc(pcm_buffer_size);
 
-	pthread_cleanup_push(CANCEL_ROUTINE(free), buffer);
+	int using_msbc = 0;
+	struct sbc_state *sbc = NULL;
 
-	if (buffer == NULL) {
+	pthread_cleanup_push(CANCEL_ROUTINE(free), pcm_buffer);
+	pthread_cleanup_push(CANCEL_ROUTINE(free), sbc);
+
+	if (pcm_buffer == NULL) {
 		error("Couldn't create data buffers: %s", strerror(ENOMEM));
 		goto fail;
 	}
@@ -1217,7 +1664,7 @@ void *io_thread_sco(void *arg) {
 			bluetooth_profile_to_string(t->profile, t->codec));
 	for (;;) {
 
-		pfds[1].fd = t->sco.mic_pcm.fd != -1 ? t->bt_fd : -1;
+		pfds[1].fd = t->bt_fd;
 		pfds[2].fd = t->sco.spk_pcm.fd;
 
 		if (poll(pfds, sizeof(pfds) / sizeof(*pfds), -1) == -1) {
@@ -1243,8 +1690,22 @@ void *io_thread_sco(void *arg) {
 				transport_release_bt_sco(t);
 				io_sync.frames = 0;
 			}
-			else
+			else {
 				transport_acquire_bt_sco(t);
+
+				fcntl(t->bt_fd, F_SETFL, fcntl(t->bt_fd, F_GETFL) | O_NONBLOCK);
+
+#if defined(ENABLE_MSBC)
+				/* This can be called again, make sure it is "reentrant" */
+				if (t->sco.codec == SCO_CODEC_MSBC) {
+					sbc = iothread_initialize_msbc(sbc);
+					if (!sbc)
+						goto fail;
+					using_msbc = 1;
+				}
+#endif
+				io_sync.sampling = transport_get_sampling(t);
+			}
 
 			continue;
 		}
@@ -1252,38 +1713,97 @@ void *io_thread_sco(void *arg) {
 		if (io_sync.frames == 0)
 			clock_gettime(CLOCK_MONOTONIC, &io_sync.ts0);
 
+		/* Bluetooth socket */
 		if (pfds[1].revents & POLLIN) {
 
 			ssize_t len;
 
-			if ((len = read(pfds[1].fd, buffer, buffer_size)) == -1) {
-				debug("SCO read error: %s", strerror(errno));
-				continue;
-			}
+#if defined(ENABLE_MSBC)
+			if (t->sco.codec == SCO_CODEC_MSBC) {
 
-			write(t->sco.mic_pcm.fd, buffer, len);
+				uint8_t *read_buf = sbc->dec_buffer + sbc->dec_buffer_cnt;
+				size_t read_buf_size = sbc->dec_buffer_size - sbc->dec_buffer_cnt;
+
+				if ((len = read(pfds[1].fd, read_buf, read_buf_size)) == -1) {
+					debug("SCO read error: %s", strerror(errno));
+					continue;
+				}
+
+				sbc->dec_buffer_cnt += len;
+
+				if (t->sco.mic_pcm.fd >= 0)
+					iothread_find_and_decode_msbc(t->sco.mic_pcm.fd, sbc);
+				else
+					sbc->dec_buffer_cnt = 0; /* Drop microphone data if PCM isn't open */
+
+				/* Synchronize write to read */
+				if (t->sco.spk_pcm.fd >= 0) {
+					iothread_write_encoded_data(pfds[1].fd, sbc, 24);
+					if ((sbc->enc_buffer_size - sbc->enc_buffer_cnt) >= SCO_H2_FRAME_LEN) {
+						pfds[2].events = POLLIN;
+					}
+				}
+			}
+			else
+#endif
+		       	{
+				/* Read CVSD data from socket and write to PCM FIFO */
+				if ((len = read(pfds[1].fd, pcm_buffer, pcm_buffer_size)) == -1) {
+					debug("SCO read error: %s", strerror(errno));
+					continue;
+				}
+
+				/* "detect" MTU on the fly */
+				if (t->mtu_write == 0) {
+					t->mtu_write = len;
+					t->mtu_read = len;
+				}
+
+				if (t->sco.mic_pcm.fd >= 0)
+					write(t->sco.mic_pcm.fd, pcm_buffer, len);
+			}
 		}
 
+                /* PCM in FIFO */
 		if (pfds[2].revents & POLLIN) {
 
-			ssize_t samples = t->mtu_write / sizeof(int16_t);
+#if defined(ENABLE_MSBC)
+			if (t->sco.codec == SCO_CODEC_MSBC) {
 
-			/* read data from the FIFO - this function will block */
-			if ((samples = io_thread_read_pcm(&t->sco.spk_pcm, buffer, samples)) <= 0) {
-				if (samples == -1)
-					error("FIFO read error: %s", strerror(errno));
-				continue;
+				ssize_t len;
+
+				/* Read PCM samples */
+				if ((len = read(t->sco.spk_pcm.fd,
+						sbc->enc_pcm_buffer + sbc->enc_pcm_buffer_cnt,
+						sbc->enc_pcm_buffer_size - sbc->enc_pcm_buffer_cnt)) == -1) {
+					error("Unable to read PCM data: %s", strerror(errno));
+					continue;
+				}
+				sbc->enc_pcm_buffer_cnt += len;
+
+				iothread_encode_msbc_frames(sbc);
+
+				/* Stop reading until there is enough space for another frame */
+				pfds[2].events = 0;
+
 			}
+			else
+#endif
+		       	{
+				io_thread_read_pcm_write_bt(&t->sco.spk_pcm, (int16_t*) pcm_buffer,
+						t->mtu_write / sizeof(int16_t), t->bt_fd);
 
-			write(t->bt_fd, buffer, samples * sizeof(int16_t));
+				/* keep data transfer at a constant bit rate */
+				io_thread_time_sync(&io_sync, t->mtu_write / sizeof(int16_t));
+			}
 		}
 
-		/* keep data transfer at a constant bit rate */
-		io_thread_time_sync(&io_sync, 48 / 2);
 
 	}
 
 fail:
 	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
 	return NULL;
 }
+
