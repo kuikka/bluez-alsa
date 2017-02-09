@@ -16,6 +16,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/eventfd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
@@ -29,6 +31,55 @@
 #include "log.h"
 #include "utils.h"
 
+static char *device_node_name(struct ba_transport *t)
+{
+	char *typename;
+	static char name[128];
+
+	switch(t->type) {
+	case TRANSPORT_TYPE_A2DP:
+		typename = "a2dp";
+		break;
+	case TRANSPORT_TYPE_RFCOMM:
+		typename = "rfcomm";
+		break;
+	case TRANSPORT_TYPE_SCO:
+		typename = "sco";
+		break;
+	default:
+		typename = "unknown";
+	}
+
+/* Example:
+ *   "bluealsa:HCI=hci0,DEV=00:11:22:33:3D:00,PROFILE=a2dp";
+ */
+	sprintf(name,"/tmp/bluealsa/bluealsa:HCI=hci%d,DEV=%s,PROFILE=%s", t->device->hci_dev_id, batostr_(&t->device->addr), typename);
+	debug("node=%s", name);
+
+	return name;
+}
+
+static void create_device_node(struct ba_transport *t)
+{
+	FILE *fp;
+	char *name;
+
+	name = device_node_name(t);
+	fp = fopen(name, "wb");
+	if (fp) {
+		fclose(fp);
+	}
+}
+
+static void remove_device_node(struct ba_transport *t)
+{
+	char *name;
+	struct stat statbuf;
+
+	name = device_node_name(t);
+	if ( ! stat(name, &statbuf) )
+		unlink(name);
+}
 
 static int io_thread_create(struct ba_transport *t) {
 
@@ -230,6 +281,8 @@ struct ba_transport *transport_new(
 		goto fail;
 
 	g_hash_table_insert(device->transports, t->dbus_path, t);
+	create_device_node(t);
+
 	return t;
 
 fail:
@@ -355,6 +408,8 @@ void transport_free(struct ba_transport *t) {
 	 * removing a value from the hash-table shouldn't hurt - it would have been
 	 * removed anyway. */
 	g_hash_table_steal(t->device->transports, t->dbus_path);
+
+	remove_device_node(t);
 
 	free(t->dbus_owner);
 	free(t->dbus_path);
