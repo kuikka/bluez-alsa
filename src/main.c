@@ -13,6 +13,10 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
@@ -28,6 +32,28 @@
 #include "utils.h"
 #include "shared/log.h"
 
+static void clear_device_enumeration_directory()
+{
+    struct dirent *dent = NULL;
+    DIR *dirp = NULL;
+
+	mkdir("/tmp/bluealsa", 0700);
+
+    dirp = opendir("/tmp/bluealsa");
+    if (dirp == NULL) {
+        return;
+    }
+	else {
+        while ( (dent = readdir(dirp)) != NULL ) {
+            const char *name = dent->d_name;
+			if (0 == strcmp(name, ".") || 0 == strcmp(name, "..")) {
+				continue;
+			}
+			unlink(name);
+        }
+        closedir(dirp);
+    }
+}
 
 static GMainLoop *loop = NULL;
 static void main_loop_stop(int sig) {
@@ -50,6 +76,7 @@ int main(int argc, char **argv) {
 		{ "disable-a2dp", no_argument, NULL, 1 },
 		{ "disable-hsp", no_argument, NULL, 2 },
 		{ "disable-hfp", no_argument, NULL, 3 },
+		{ "disable-msbc", no_argument, NULL, 9 },
 #if ENABLE_AAC
 		{ "aac-afterburner", no_argument, NULL, 4 },
 		{ "aac-vbr-mode", required_argument, NULL, 5 },
@@ -64,6 +91,7 @@ int main(int argc, char **argv) {
 	int hci_devs_num;
 
 	log_open(argv[0], false, BLUEALSA_LOGTIME);
+	clear_device_enumeration_directory();
 
 	if (bluealsa_config_init() != 0) {
 		error("Couldn't initialize bluealsa config");
@@ -147,6 +175,10 @@ int main(int argc, char **argv) {
 			break;
 		case 3 /* --disable-hfp */ :
 			config.enable_hfp = FALSE;
+			break;
+
+		case 9 /* --disable-msbc */ :
+			config.enable_msbc = FALSE;
 			break;
 
 #if ENABLE_AAC

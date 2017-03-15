@@ -29,7 +29,6 @@
 #include "a2dp-codecs.h"
 #include "bluealsa.h"
 #include "bluez.h"
-#include "hfp.h"
 #include "transport.h"
 #include "utils.h"
 #include "shared/ctl-proto.h"
@@ -88,8 +87,7 @@ static int _transport_lookup(GHashTable *devices, const bdaddr_t *addr,
 			case PCM_TYPE_SCO:
 				if ((*t)->type != TRANSPORT_TYPE_SCO)
 					continue;
-				/* ignore SCO transport if codec is not selected yet */
-				if ((*t)->codec == HFP_CODEC_UNDEFINED)
+				if ((*t)->sco.codec == TRANSPORT_SCO_CODEC_UNKNOWN)
 					continue;
 				break;
 			}
@@ -223,7 +221,7 @@ static void ctl_thread_cmd_list_devices(const struct request *req, int fd) {
 		strncpy(device.name, d->name, sizeof(device.name) - 1);
 		device.name[sizeof(device.name) - 1] = '\0';
 
-		device.battery = d->xapl.features & XAPL_FEATURE_BATTERY ? 1 : 0;
+		device.battery = d->xapl.features & DEVICE_XAPL_FEATURE_BATTERY ? 1 : 0;
 		device.battery_level = d->xapl.accev_battery;
 
 		send(fd, &device, sizeof(device), MSG_NOSIGNAL);

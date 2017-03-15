@@ -35,6 +35,18 @@ enum ba_transport_state {
 	TRANSPORT_ABORTED,
 };
 
+/* These match HFP codec defitions, do not reorder */
+enum sco_codec {
+	TRANSPORT_SCO_CODEC_UNKNOWN,
+	TRANSPORT_SCO_CODEC_CVSD,
+	TRANSPORT_SCO_CODEC_MSBC,
+};
+
+#define DEVICE_XAPL_FEATURE_BATTERY (1 << 1)
+#define DEVICE_XAPL_FEATURE_DOCKING (1 << 2)
+#define DEVICE_XAPL_FEATURE_SIRI    (1 << 3)
+#define DEVICE_XAPL_FEATURE_DENOISE (1 << 4)
+
 struct ba_device {
 
 	/* ID of the underlying HCI device */
@@ -165,6 +177,7 @@ struct ba_transport {
 
 			/* HF feature flags */
 			uint32_t hf_features;
+			enum sco_codec codec;
 
 		} sco;
 

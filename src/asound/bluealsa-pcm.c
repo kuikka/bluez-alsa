@@ -25,6 +25,7 @@
 #include "shared/ctl-client.h"
 #include "shared/ctl-proto.h"
 #include "shared/log.h"
+#include "shared/rt.h"
 
 
 /* Helper macro for obtaining the size of a static array. */
@@ -60,6 +61,12 @@ struct bluealsa_pcm {
 
 };
 
+static unsigned long get_time_ms()
+{
+	struct timespec ts;
+	gettimestamp(&ts);
+	return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /**
  * IO thread, which facilitates ring buffer. */
@@ -81,8 +88,11 @@ static void *io_thread(void *arg) {
 			goto final;
 		}
 	}
+	unsigned long prev = 0;
 
 	debug("Starting IO loop");
+	debug("io->buffer_size = %d io->period_size = %d pcm->frame_size = %d", (int) io->buffer_size, (int) io->period_size, (int) pcm->frame_size);
+	FILE *o = fopen("dump_plugin.bin", "wb");
 	for (;;) {
 
 		snd_pcm_uframes_t io_ptr = pcm->io_ptr;
@@ -99,6 +109,12 @@ static void *io_thread(void *arg) {
 		 * periods - it could be an ALSA bug, though, it has to be handled. */
 		if (io_buffer_size - io_ptr < frames)
 			frames = io_buffer_size - io_ptr;
+
+		SNDERR("io_ptr=%u, io_buffer_size=%u, period_size=%u, zz=%u",
+		       (unsigned) io_ptr,
+		       (unsigned) io_buffer_size,
+		       (unsigned) io->period_size,
+		       (unsigned) (io_buffer_size - io_ptr));
 
 		/* IO operation size in bytes */
 		len = frames * pcm->frame_size;
@@ -124,6 +140,7 @@ static void *io_thread(void *arg) {
 		}
 		else {
 
+			size_t wrote = len;
 			/* Perform atomic write - see the explanation above. */
 			do {
 				if ((ret = write(pcm->pcm_fd, head, len)) == -1) {
@@ -132,10 +149,17 @@ static void *io_thread(void *arg) {
 					SNDERR("PCM FIFO write error: %s", strerror(errno));
 					goto final;
 				}
+				if (o)
+					fwrite(head, len, 1, o);
 				head += ret;
 				len -= ret;
 			}
 			while (len != 0);
+			unsigned long now = get_time_ms();
+			unsigned long delta = now - prev;
+//			if ( delta < 8 || delta > 25 )
+				SNDERR("Delta %lu, wrote %zu", delta, wrote);
+			prev = now;
 
 			/* Silence processed period, so if the underrun occurs,
 			 * we will play silence instead of previous samples. */
@@ -158,6 +182,9 @@ final:
 
 static int bluealsa_start(snd_pcm_ioplug_t *io) {
 	struct bluealsa_pcm *pcm = io->private_data;
+	struct sched_param param = { 0 };
+	int policy;
+
 	debug("Starting");
 
 	/* If the IO thread is already started, skip thread creation. Otherwise,
@@ -182,6 +209,11 @@ static int bluealsa_start(snd_pcm_ioplug_t *io) {
 	}
 
 	pthread_setname_np(pcm->io_thread, "pcm-io");
+
+	/* give the feeding thread priority over the consumer */
+	param.sched_priority = 9;
+	(void) pthread_setschedparam(pcm->io_thread, SCHED_RR, &param);
+
 	return 0;
 }
 
@@ -240,7 +272,9 @@ static int bluealsa_hw_params(snd_pcm_ioplug_t *io, snd_pcm_hw_params_t *params)
 		debug("FIFO buffer size: %zd", pcm->pcm_buffer_size);
 	}
 
-	debug("Selected HW buffer: %zd periods x %zd bytes %c= %zd bytes",
+	SNDERR("io->buffer_size: %zd", io->buffer_size);
+	SNDERR("io->period_size: %zd", io->period_size);
+	SNDERR("Selected HW buffer: %zd periods x %zd bytes %c= %zd bytes",
 			io->buffer_size / io->period_size, pcm->frame_size * io->period_size,
 			io->period_size * (io->buffer_size / io->period_size) == io->buffer_size ? '=' : '<',
 			io->buffer_size * pcm->frame_size);
@@ -322,27 +356,18 @@ static int bluealsa_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delayp) {
 	snd_pcm_sframes_t delay = 0;
 	unsigned int size;
 
-	/* bytes queued in the PCM ring buffer */
-	delay += io->appl_ptr - io->hw_ptr;
-
 	/* bytes queued in the FIFO buffer */
 	if (ioctl(pcm->pcm_fd, FIONREAD, &size) != -1)
 		delay += size / pcm->frame_size;
 
-	/* On the server site, the delay stat will not be available until the PCM
-	 * data transfer is started. Do not make an unnecessary call then. */
-	if ((io->state == SND_PCM_STATE_RUNNING || io->state == SND_PCM_STATE_DRAINING)) {
+	/* data transfer (communication) and encoding/decoding */
+	if (io->state == SND_PCM_STATE_RUNNING && io->stream == SND_PCM_STREAM_PLAYBACK &&
+			(pcm->delay == 0 || ++counter % (io->rate / 10) == 0)) {
 
-		/* data transfer (communication) and encoding/decoding */
-		if (io->stream == SND_PCM_STREAM_PLAYBACK &&
-				(pcm->delay == 0 || ++counter % (io->rate / 10) == 0)) {
-
-			int tmp;
-			if ((tmp = bluealsa_get_transport_delay(pcm->fd, pcm->transport)) != -1) {
-				pcm->delay = (io->rate / 100) * tmp / 100;
-				debug("BlueALSA delay: %.1f ms (%ld frames)", (float)tmp / 10, pcm->delay);
-			}
-
+		int tmp;
+		if ((tmp = bluealsa_get_transport_delay(pcm->fd, pcm->transport)) != -1) {
+			pcm->delay = (io->rate / 100) * tmp / 100;
+			debug("BlueALSA delay: %.1f ms (%ld frames)", (float)tmp / 10, pcm->delay);
 		}
 
 	}
@@ -470,6 +495,10 @@ static int bluealsa_set_hw_constraint(struct bluealsa_pcm *pcm) {
 
 	if ((err = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIOD_BYTES,
 					128, 1024 * 4)) < 0)
+		return err;
+
+	if ((err = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_BUFFER_BYTES,
+					256, 2 * 1024 * 4)) < 0)
 		return err;
 
 	if ((err = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_CHANNELS,

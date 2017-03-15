@@ -94,10 +94,9 @@ int hci_devlist(struct hci_dev_info **di, int *num) {
  * @param di The address to the HCI device info structure for which the SCO
  *   link should be established.
  * @param ba Pointer to the Bluetooth address structure for a target device.
- * @param transparent Use transparent mode for voice transmission.
  * @return On success this function returns socket file descriptor. Otherwise,
  *   -1 is returned and errno is set to indicate the error. */
-int hci_open_sco(const struct hci_dev_info *di, const bdaddr_t *ba, bool transparent) {
+int hci_open_sco(const struct hci_dev_info *di, const bdaddr_t *ba, int transparent) {
 
 	struct sockaddr_sco addr_hci = {
 		.sco_family = AF_BLUETOOTH,
@@ -111,19 +110,25 @@ int hci_open_sco(const struct hci_dev_info *di, const bdaddr_t *ba, bool transpa
 
 	if ((dd = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_SCO)) == -1)
 		return -1;
-	if (bind(dd, (struct sockaddr *)&addr_hci, sizeof(addr_hci)) == -1)
+	if (bind(dd, (struct sockaddr *)&addr_hci, sizeof(addr_hci)) == -1) {
+		warn("SCO bind failed");
 		goto fail;
+	}
 
 	if (transparent) {
 		struct bt_voice voice = {
 			.setting = BT_VOICE_TRANSPARENT,
 		};
-		if (setsockopt(dd, SOL_BLUETOOTH, BT_VOICE, &voice, sizeof(voice)) == -1)
+		if (setsockopt(dd, SOL_BLUETOOTH, BT_VOICE, &voice, sizeof(voice)) == -1) {
+			warn("setsockopt BT_VOICE failed");
 			goto fail;
+		}
 	}
 
-	if (connect(dd, (struct sockaddr *)&addr_dev, sizeof(addr_dev)) == -1)
+	if (connect(dd, (struct sockaddr *)&addr_dev, sizeof(addr_dev)) == -1) {
+		warn("SCO connect failed");
 		goto fail;
+	}
 
 	return dd;
 

@@ -16,6 +16,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/eventfd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
@@ -25,11 +27,90 @@
 
 #include "a2dp-codecs.h"
 #include "bluealsa.h"
-#include "hfp.h"
 #include "io.h"
 #include "utils.h"
 #include "shared/log.h"
 
+static char *transport_type_to_name(enum ba_transport_type type)
+{
+	char *typename;
+
+	switch(type) {
+	case TRANSPORT_TYPE_A2DP:
+		typename = "a2dp";
+		break;
+	case TRANSPORT_TYPE_RFCOMM:
+		typename = "rfcomm";
+		break;
+	case TRANSPORT_TYPE_SCO:
+		typename = "sco";
+		break;
+	default:
+		typename = "unknown";
+	}
+
+	return typename;
+}
+
+static char *device_node_name(struct ba_transport *t)
+{
+	char *typename;
+	static char name[128];
+
+	typename = transport_type_to_name(t->type);
+
+/* Example:
+ *   "bluealsa:HCI=hci0,DEV=00:11:22:33:3D:00,PROFILE=a2dp";
+ */
+	sprintf(name,"/tmp/bluealsa/bluealsa:HCI=hci%d,DEV=%s,PROFILE=%s", t->device->hci_dev_id, batostr_(&t->device->addr), typename);
+	debug("node=%s\n", name);
+
+	return name;
+}
+
+static char *asoundrc_template =
+"defaults.bluealsa.interface \"hci%d\"\n"
+"defaults.bluealsa.device \"%s\"\n"
+"defaults.bluealsa.profile \"%s\"\n"
+;
+
+static void create_device_node(struct ba_transport *t)
+{
+	FILE *fp;
+	char *name;
+
+	name = device_node_name(t);
+	fp = fopen(name, "wb");
+	if (fp) {
+		fclose(fp);
+	}
+
+	/* create the asoundrc in an atomic way */
+	fp = fopen("/tmp/asoundrc.unatomic", "wb");
+	if (fp) {
+		fprintf(fp, asoundrc_template, t->device->hci_dev_id, batostr_(&t->device->addr), transport_type_to_name(t->type));
+		fclose(fp);
+	}
+	rename("/tmp/asoundrc.unatomic", "/tmp/asoundrc");
+}
+
+static void remove_device_node(struct ba_transport *t)
+{
+	char *name;
+	struct stat statbuf;
+
+	name = device_node_name(t);
+	if ( ! stat(name, &statbuf) )
+		unlink(name);
+
+	name = "/tmp/asoundrc.unatomic";
+	if ( ! stat(name, &statbuf) )
+		unlink(name);
+
+	name = "/tmp/asoundrc";
+	if ( ! stat(name, &statbuf) )
+		unlink(name);
+}
 
 static int io_thread_create(struct ba_transport *t) {
 
@@ -193,7 +274,6 @@ gboolean device_remove(GHashTable *devices, const char *key) {
  * @param dbus_owner D-Bus service, which owns this transport.
  * @param dbus_path D-Bus service path for this transport.
  * @param profile Bluetooth profile.
- * @param codec Used audio codec.
  * @return On success, the pointer to the newly allocated transport structure
  *   is returned. If error occurs, NULL is returned and the errno variable is
  *   set to indicated the cause of the error. */
@@ -217,10 +297,6 @@ struct ba_transport *transport_new(
 	t->profile = profile;
 	t->codec = codec;
 
-	/* HSP supports CVSD only */
-	if (profile == BLUETOOTH_PROFILE_HSP_HS || profile == BLUETOOTH_PROFILE_HSP_AG)
-		t->codec = HFP_CODEC_CVSD;
-
 	t->state = TRANSPORT_IDLE;
 	t->thread = config.main_thread;
 
@@ -236,6 +312,8 @@ struct ba_transport *transport_new(
 		goto fail;
 
 	g_hash_table_insert(device->transports, t->dbus_path, t);
+	create_device_node(t);
+
 	return t;
 
 fail:
@@ -290,7 +368,7 @@ struct ba_transport *transport_new_rfcomm(
 
 	dbus_path_sco = g_strdup_printf("%s/sco", dbus_path);
 	if ((t_sco = transport_new(device, TRANSPORT_TYPE_SCO,
-					dbus_owner, dbus_path_sco, profile, HFP_CODEC_UNDEFINED)) == NULL)
+					dbus_owner, dbus_path_sco, profile, -1)) == NULL)
 		goto fail;
 
 	t->rfcomm.sco = t_sco;
@@ -361,6 +439,8 @@ void transport_free(struct ba_transport *t) {
 	 * removing a value from the hash-table shouldn't hurt - it would have been
 	 * removed anyway. */
 	g_hash_table_steal(t->device->transports, t->dbus_path);
+
+	remove_device_node(t);
 
 	free(t->dbus_owner);
 	free(t->dbus_path);
@@ -543,10 +623,12 @@ unsigned int transport_get_sampling(const struct ba_transport *t) {
 	case TRANSPORT_TYPE_RFCOMM:
 		break;
 	case TRANSPORT_TYPE_SCO:
-		switch (t->codec) {
-			case HFP_CODEC_CVSD:
+		switch (t->sco.codec) {
+			case TRANSPORT_SCO_CODEC_UNKNOWN:
+				return 0;
+			case TRANSPORT_SCO_CODEC_CVSD:
 				return 8000;
-			case HFP_CODEC_MSBC:
+			case TRANSPORT_SCO_CODEC_MSBC:
 				return 16000;
 		}
 	}
@@ -794,7 +876,7 @@ int transport_acquire_bt_sco(struct ba_transport *t) {
 		return -1;
 	}
 
-	if ((t->bt_fd = hci_open_sco(&di, &t->device->addr, t->codec != HFP_CODEC_CVSD)) == -1) {
+	if ((t->bt_fd = hci_open_sco(&di, &t->device->addr, t->sco.codec == TRANSPORT_SCO_CODEC_MSBC)) == -1) {
 		error("Couldn't open SCO link: %s", strerror(errno));
 		return -1;
 	}

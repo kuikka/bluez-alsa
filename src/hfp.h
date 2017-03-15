@@ -1,7 +1,6 @@
 /*
- * BlueALSA - hfp.h
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
- *               2017 Juha Kuikka
+ * BlueALSA - io.c
+ * Copyright (c) 2017 Juha Kuikka
  *
  * This file is a part of bluez-alsa.
  *
@@ -13,23 +12,16 @@
 #define BLUEALSA_HFP_H_
 
 /* HFP codec IDs */
-#define HFP_CODEC_UNDEFINED 0x00
-#define HFP_CODEC_CVSD      0x01
-#define HFP_CODEC_MSBC      0x02
+#define HFP_CODEC_CVSD		1
+#define HFP_CODEC_MSBC		2
 
-/* AG feature flags */
-#define HFP_AG_FEAT_CODEC (1 << 9)
-#define HFP_AG_FEAT_ECS   (1 << 6)
+/* AG Feature flags */
+#define HFP_AG_FEAT_CODEC	(1 << 9)
+#define HFP_AG_FEAT_ECS		(1 << 6)
 
 /* HF feature flags */
-#define HFP_HF_FEAT_CODEC (1 << 7)
+#define HFP_HF_FEAT_CODEC	(1 << 7)
 
-#define HFP_AG_FEATURES HFP_AG_FEAT_ECS
+#define HFP_AG_FEATURES		 HFP_AG_FEAT_ECS
 
-/* Apple's extension feature flags */
-#define XAPL_FEATURE_BATTERY (1 << 1)
-#define XAPL_FEATURE_DOCKING (1 << 2)
-#define XAPL_FEATURE_SIRI    (1 << 3)
-#define XAPL_FEATURE_DENOISE (1 << 4)
-
-#endif
+#endif /* BLUEALSA_HFP_CODECS_H_ */
